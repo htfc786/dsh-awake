@@ -3,16 +3,10 @@
  * 命名与约定见 DESIGN.md —— 勿改。
  */
 
-/** 插件包名（也是 Cordis 条目名 / settings 命名空间 / 设置页 slot id）。 */
+/** 插件包名（也是 Cordis 条目名 / 配置条目 id / plugins.bundle.config 的 key）。 */
 export const PLUGIN_ID = 'dsh-awake'
 
-/** settings 命名空间（settings.yaml 里持久化的顶层键）。 */
-export const SETTINGS_NS = 'dsh-awake'
-
-/** 设置页 settings.section slot 的注册 id。 */
-export const SETTINGS_SLOT_ID = 'dsh-awake'
-
-/** 设置页 locale 命名空间（client 半注册到 dsh-client-locale）。 */
+/** 配置面板 locale 命名空间（client 半注册到 dsh-client-locale）。 */
 export const SETTINGS_LOCALE_NS = 'settings.awake'
 
 /**
@@ -26,9 +20,6 @@ export const SETTINGS_LOCALE_NS = 'settings.awake'
  * DSH 0.1.5-rc 起必抛 "cannot get property webServer without inject"（详见 README）。
  */
 export const RPC_ROUTE_PATH = '/api/dsh-awake'
-
-/** 设置页在 settings.section 里的排序（越大越靠后）。 */
-export const SECTION_ORDER = 60
 
 /** 浏览器 Wake Lock 的 localStorage 键（每浏览器状态，不进配置文件）。 */
 export const LOCALSTORAGE_KEY = 'dsh-awake.webWakeLock'

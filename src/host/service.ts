@@ -6,15 +6,15 @@
  *   4. 设置页数据面 POST /api/dsh-awake（可选服务；缺席则设置页数据面停用）；
  *   5. 会话生命周期事件 + 卸载放锁。
  */
-import { PLUGIN_ID } from '../shared/constants.js'
+import { CONFIG_VERSION, PLUGIN_ID } from '../shared/constants.js'
 import type { AwakeStatus, ModeInfo, ModeTestResult, SelectResponse } from '../types.js'
 import { detectPlatform, normalizeConfig, registryFor, type ModeSession, type PlatformRegistry, type WakeMode } from '../modes/index.js'
 import { errorMessage } from '../modes/shared/tools.js'
 import { AwakeCoordinator } from './coordinator.js'
-import { getOptionalService, type HostContext } from './context.js'
+import { getOptionalService, type HostContext, type ResolvedConfig } from './context.js'
 import { installAwakeRpc } from './rpc.js'
 import { restartHost } from './restart.js'
-import { AwakeSettings, buildBase, type ParsedAwakeSettings } from './settings.js'
+import { AwakeSettings, type ParsedAwakeSettings } from './settings.js'
 import { createUpdateHelper } from './update.js'
 import { versionInfo } from './version.js'
 
@@ -33,7 +33,7 @@ export class AwakeService {
   /** 常开防休眠：纯内存状态（不写配置文件，宿主重启即失效，设置页每次用时再开）。 */
   private alwaysOn = false
 
-  constructor(ctx: HostContext, config: Record<string, unknown> = {}) {
+  constructor(ctx: HostContext, config: ResolvedConfig = {}) {
     const platform = detectPlatform()
     this.registry = registryFor(platform)
     // 桌面端环境识别（官方兼容模式）：desktopProfiles / desktopPnpm 只在
@@ -50,7 +50,8 @@ export class AwakeService {
       },
       logger: ctx.logger,
     })
-    settingsRef = new AwakeSettings(ctx, buildBase(config, platform), () => this.coordinator.reconcile(), ctx.logger)
+    // 配置读取走 apply 收到的 config 引用树（live 字段 volatile，就地更新）。
+    settingsRef = new AwakeSettings(ctx, () => config, () => this.coordinator.reconcile(), ctx.logger)
     this.settings = settingsRef
     settingsRef.attach()
 
@@ -137,25 +138,27 @@ export class AwakeService {
   }
 
   /**
-   * 写配置：normalize → settings.replace（整段替换，避免深合并残留旧 config 键）→
-   * 对账（settings/updated 事件触发，等链排空）+ 试运行。
+   * 写配置：normalize → configEditor 整段写回（避免深合并残留旧 config 键）→
+   * 重读实时配置 + 对账（openTurns > 0 时先放锁再按新配置拿锁）+ 试运行。
    */
   async select(mode: string, config: Record<string, unknown>): Promise<SelectResponse> {
     const platform = detectPlatform()
     if (platform === 'unsupported') throw new Error('当前平台不受支持')
-    const replacer = this.settings.replacer
-    if (replacer === null) throw new Error('settings 服务不可用（只读）')
+    const writer = this.settings.writer
+    if (writer === null) throw new Error('配置写入不可用（configEditor 缺席，只读）')
     if (mode !== 'off') {
       const registry = registryFor(platform)
       const target = registry?.modes[mode]
       if (target === undefined) throw new Error(`方式 ${mode} 在当前平台不可用`)
       const normalized = normalizeConfig(target.fields, config)
-      await replacer({ version: 2, platform, mode, config: normalized })
+      await writer({ version: CONFIG_VERSION, platform, mode, config: normalized })
     } else {
-      await replacer({ version: 2, platform, mode: 'off', config: {} })
+      await writer({ version: CONFIG_VERSION, platform, mode: 'off', config: {} })
     }
-    // settings/updated 事件已触发对账（openTurns > 0 时先放锁再按新配置拿锁）；
-    // 等串行链排空，让响应反映最新生效状态。
+    // 写入后重读实时配置（volatile 引用由 loader 就地更新）→ 对账；等链排空，
+    // 让响应反映最新生效状态。
+    this.settings.reload()
+    await this.coordinator.reconcile()
     await this.coordinator.drain()
     const status = this.status()
     // 应用后测试方案是否可用（start→stop 冒烟；off / 有任务运行 / 平台不支持时跳过）。

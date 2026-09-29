@@ -5,7 +5,6 @@
 
 /** 简体中文（基准）。 */
 export const zh = {
-  sectionLabel: '防休眠',
   loading: '读取状态…',
   loadError: '读取失败：',
   // —— 状态行（2.1）——
@@ -65,7 +64,6 @@ export type LocaleKey = keyof typeof zh
 
 /** English（与 zh 键一一对应）。 */
 export const en: Record<LocaleKey, string> = {
-  sectionLabel: 'Awake',
   loading: 'Loading status…',
   loadError: 'Failed to load: ',
   backendConnected: 'Backend connected',

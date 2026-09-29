@@ -1,22 +1,24 @@
 /**
- * settings 命名空间（可选服务：缺席时退回入口配置，只读）。
+ * 插件配置（DSH 0.1.7 模型：插件 Config schema + configEditor）。
  *
- * - 宽松 schema：`{ version, platform, mode, config: 任意对象 }`——绝不在 schema
- *   里枚举 config 键（键由方式声明，校验在 host 侧 normalizeConfig）；
- * - stale 检测（跨平台复制 / 插件升级实现被删，统一一条逻辑，见 parseSettings）；
- * - 老版（0.1.x）配置自动迁移（enabled/shellWakeLock/powerCfgWakeLock/webWakeLock/why
- *   → version/platform/mode/config），迁移读原始 user 层，一次写回新格式；
- * - 每次 settings/updated 触发重新解析 + 协调器对账（openTurns > 0 时先放锁再拿锁）。
+ * 0.1.7 起，dsh-settings 的旧 API（register/get/update/replace 命名空间）已移除，
+ * 设置改为「插件自己的 Config」单一层：apply(ctx, config) 收到解析后的 config 引用树
+ * （live 字段 .volatile() → config.<field>.get() 读实时值；loader 的 _commitVolatile
+ * 在设置写入时就地更新引用，不重启插件）。写入走 configEditor.edit(entry, updater)，
+ * 持久化到当前 profile 的插件配置。
  *
- * schemastery 通过 profile 上下文动态解析（createRequire），不依赖本包自身的
- * 依赖安装状态（pnpm 对 link: 本地包不重新解析依赖，见 dsh-win-mgr AGENTS.md 4.4）。
+ * 本文件保留与旧版一致的语义：
+ *   - 宽松形状：`{ version, platform, mode, config: 任意对象 }`——config 键由方式声明；
+ *   - stale 检测（跨平台复制 / 实现被删，见 parseSettings）；
+ *   - 老版（0.1.x）配置自动迁移（enabled/shellWakeLock/powerCfgWakeLock/why → 新形状），
+ *     识别原始 config 后一次写回；
+ *   - 设置变更（loader/volatile-update）触发重新解析 + 协调器对账。
  */
-import { createRequire } from 'node:module'
-import { CONFIG_VERSION, PLUGIN_ID, SETTINGS_NS } from '../shared/constants.js'
+import { CONFIG_VERSION, PLUGIN_ID } from '../shared/constants.js'
 import type { AwakeSettingsShape } from '../types.js'
 import { detectPlatform, powerModes, registryFor, type PlatformId } from '../modes/index.js'
 import { errorMessage } from '../modes/shared/tools.js'
-import type { HostContext, LoggerLike, SchemasteryNamespace, SettingsService } from './context.js'
+import type { ConfigEditorService, HostContext, LoggerLike } from './context.js'
 
 /** 解析后的配置快照（stale 兜底已应用）。 */
 export interface ParsedAwakeSettings {
@@ -37,6 +39,24 @@ export function isLegacyShape(value: unknown): boolean {
   if (typeof value !== 'object' || value === null) return false
   const v = value as Record<string, unknown>
   return 'enabled' in v || 'shellWakeLock' in v || 'powerCfgWakeLock' in v || 'webWakeLock' in v || 'why' in v
+}
+
+/** 一个 volatile 引用（.get() 读实时值）——loader _commitVolatile 就地更新。 */
+function isConfigRef(value: unknown): value is { get(): unknown } {
+  return typeof value === 'object' && value !== null && typeof (value as { get?: unknown }).get === 'function'
+}
+
+/**
+ * 把 apply(ctx, config) 收到的解析后 Config（live 字段为 volatile 引用）摊平成普通对象。
+ * 未知键（未迁移的旧形状）原样透传，供 isLegacyShape 识别。
+ */
+export function readLiveConfig(source: unknown): Record<string, unknown> {
+  if (typeof source !== 'object' || source === null) return {}
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(source)) {
+    out[key] = isConfigRef(value) ? value.get() : value
+  }
+  return out
 }
 
 /**
@@ -64,7 +84,7 @@ export function parseSettings(value: unknown, platform: PlatformId | 'unsupporte
   return { modeId: registry.defaultMode, stale: true, configuredPlatform, configuredMode, config }
 }
 
-/** 从入口配置构建 base（丢弃 0.1.x 旧键；平台/方式缺省取当前平台默认）。 */
+/** 从配置构建补全默认后的形状（丢弃 0.1.x 旧键；平台/方式缺省取当前平台默认）。 */
 export function buildBase(
   entry: Record<string, unknown> | undefined,
   platform: PlatformId | 'unsupported',
@@ -78,19 +98,38 @@ export function buildBase(
   }
 }
 
+/** 0.1.x 旧形状 → 新形状（enabled/shellWakeLock/powerCfgWakeLock/why）。 */
+export function migrateLegacyShape(
+  raw: Record<string, unknown>,
+  platform: PlatformId | 'unsupported',
+): AwakeSettingsShape {
+  const registry = registryFor(platform)
+  let mode: string
+  if (raw.enabled === false) {
+    mode = 'off'
+  } else if (raw.powerCfgWakeLock === true && raw.shellWakeLock !== true && platform !== 'unsupported') {
+    // 只开 powerCfg → 该平台电源类实现。
+    mode = powerModes[platform]
+  } else {
+    mode = registry?.defaultMode ?? 'off'
+  }
+  const config: Record<string, unknown> = {}
+  if (typeof raw.why === 'string' && raw.why.length > 0) config.why = raw.why
+  return { version: CONFIG_VERSION, platform, mode, config }
+}
+
 export class AwakeSettings {
   private parsed: ParsedAwakeSettings
-  private updater: ((patch: Record<string, unknown>) => Promise<unknown>) | null = null
-  private replacerImpl: ((section: Record<string, unknown>) => Promise<unknown>) | null = null
+  private writerImpl: ((next: AwakeSettingsShape) => Promise<unknown>) | null = null
 
   constructor(
     private readonly ctx: HostContext,
-    private readonly base: AwakeSettingsShape,
+    /** 读取实时配置（生产：apply 收到的 config 引用树；引用被就地更新）。 */
+    private readonly readSource: () => unknown,
     private readonly onReconcile: () => Promise<void>,
     private readonly logger: LoggerLike,
   ) {
-    // 未挂载 settings 服务时退回入口配置（只读）。
-    this.parsed = parseSettings(base, detectPlatform())
+    this.parsed = this.parse()
   }
 
   /** 当前解析结果（服务状态用）。 */
@@ -98,92 +137,88 @@ export class AwakeSettings {
     return this.parsed
   }
 
-  /** settings 写入钩子：update（深合并，用于局部补丁）。服务缺席为 null = 只读。 */
-  get writer(): ((patch: Record<string, unknown>) => Promise<unknown>) | null {
-    return this.updater
-  }
-
   /**
-   * settings 写入钩子：replace（整段替换，config 换方式时清残留键的路径——
-   * update 是深合并，`config: {}` 合并不掉旧键，select 必须走 replace）。
-   * 服务缺席为 null = 只读。
+   * 写入钩子：整段替换插件配置（configEditor.edit 落盘 profile 配置）。
+   * 服务/entry 缺席为 null = 只读。
    */
-  get replacer(): ((section: Record<string, unknown>) => Promise<unknown>) | null {
-    return this.replacerImpl
+  get writer(): ((next: AwakeSettingsShape) => Promise<unknown>) | null {
+    return this.writerImpl
   }
 
-  /** 注册 settings 命名空间（可选服务；callback 在服务可用时执行）。 */
+  /** 重新读取实时配置并解析（写入后 / 外部 volatile 更新后）。 */
+  reload(): ParsedAwakeSettings {
+    this.parsed = this.parse()
+    return this.parsed
+  }
+
+  private parse(): ParsedAwakeSettings {
+    const platform = detectPlatform()
+    return parseSettings(buildBase(readLiveConfig(this.readSource()), platform), platform)
+  }
+
+  /** 装配：页面策略（抑制自动页）+ 写入钩子 + 外部配置变更监听。 */
   attach(): void {
-    // schemastery 通过 profile 上下文动态解析（createRequire）；解析失败 = 跳过注册（只读）。
-    let schema: SchemasteryNamespace | undefined
-    if (this.ctx.baseUrl !== undefined) {
-      try {
-        const require = createRequire(this.ctx.baseUrl)
-        schema = require('@deepseek-ai/schemastery') as SchemasteryNamespace
-      } catch (error) {
-        this.logger.warn(`[${PLUGIN_ID}] 无法解析 @deepseek-ai/schemastery（${errorMessage(error)}），设置页热配置不可用，仅使用入口配置`)
-      }
-    }
-    if (schema === undefined) return
-
+    // 页面策略：配置面板已迁到「插件列表 → 插件详情」（plugins.bundle.config），
+    // 不再向设置面板注册 settings.section。此时必须 auto:false —— settings 服务
+    // 的 describe() 对每个插件条目默认 autoGenerate=true（presentations.get(fiber)
+    // ?.auto ?? true），会自动按插件 Config schema 生成一个设置页；不关掉它，本
+    // 插件会重新出现在 DSH 设置面板，与「退役 settings.section」的决定相悖。
+    // （这与 dsh-yolo-mode 0.6.2 保留 configure({auto:false}) 的做法一致。）
+    // configure 是 0.1.7 起 SettingsForms 的 API；老版 settings 服务没有它，
+    // 这里做能力探测，避免在旧宿主上抛错。
     this.ctx.inject(['settings'], (sctx) => {
-      // 宽松 schema：config 用 any()（任意对象），绝不在 schema 里枚举 config 键。
-      const valueSchema = schema!.object({
-        version: schema!.number().required(false).description('配置文件版本（当前 2；老配置自动转换）'),
-        platform: schema!.string().required(false).description('锚点：上次写入配置的平台（复制 .dsh 到其他系统时识别）'),
-        mode: schema!.string().required(false).description('当前平台选中的方式（= 实现文件名）；off = 关闭服务端'),
-        config: schema!.any().required(false).description('该方式的配置；字段由方式声明（宽松 schema）'),
-      })
-      sctx.settings.register(SETTINGS_NS, valueSchema, { base: this.base })
-      this.updater = (patch) => sctx.settings.update(SETTINGS_NS, patch)
-      this.replacerImpl = (section) => sctx.settings.replace(SETTINGS_NS, section)
+      const settings = sctx.settings
+      if (settings === undefined || typeof settings.configure !== 'function') return
+      sctx.effect(() => settings.configure({ auto: false }, this.ctx.fiber))
+    })
 
-      const apply = async (): Promise<void> => {
-        const platform = detectPlatform()
-        this.parsed = parseSettings(sctx.settings.get(SETTINGS_NS), platform)
-        void this.onReconcile()
-        await this.maybeMigrate(sctx, platform)
+    // 写入：configEditor.edit（0.1.7 官方写法，持久化到 profile 配置）。
+    this.ctx.inject(['configEditor'], (cctx) => {
+      const entry = this.ctx.fiber?.entry
+      const editor: ConfigEditorService | undefined = cctx.configEditor
+      if (editor === undefined) {
+        this.logger.warn(`[${PLUGIN_ID}] configEditor 服务不可用，设置页写入停用（服务端照常值守）`)
+        return
       }
+      if (entry === undefined) {
+        this.logger.warn(`[${PLUGIN_ID}] 未取得 Loader entry，设置写入不可用（只读；仅非 Loader 挂载时出现）`)
+        return
+      }
+      this.writerImpl = (next) => editor.edit(entry, () => ({ ...next }))
+      this.logger.info(`[${PLUGIN_ID}] 设置写入走 configEditor（profile 配置${entry.options?.id === undefined ? '' : ` ${entry.options.id}`}）`)
+      void this.apply()
+    })
 
-      sctx.on('settings/updated', (ns: unknown) => {
-        if (ns === SETTINGS_NS) void apply()
-      })
-      void apply()
-      this.logger.info(`[${PLUGIN_ID}] settings 命名空间 ${SETTINGS_NS} 已注册（设置页可热改配置）`)
+    // 外部配置变更（用户手改 profile 配置 → loader 就地提交 volatile，不重启）：重新对账。
+    this.ctx.on('loader/volatile-update', () => {
+      void this.apply()
     })
   }
 
+  private async apply(): Promise<void> {
+    this.reload()
+    void this.onReconcile()
+    await this.maybeMigrate()
+  }
+
   /**
-   * 0.1.x → 0.2.0 自动迁移（读原始 user 层，一次写回新格式；写回后 settings/updated
-   * 再次触发 apply，届时已是新格式，不再迁移——无循环）。
+   * 0.1.x → 新形状自动迁移：识别原始 config 的旧键，一次写回新形状（写回后不再命中，
+   * 无循环）。写回会触发正常 Loader 热更新（旧键移除属非 volatile 变更 → 插件重启一次）。
    */
-  private async maybeMigrate(sctx: { readonly settings: SettingsService }, platform: PlatformId | 'unsupported'): Promise<void> {
-    const descriptor = sctx.settings.describe().find((d) => d.ns === SETTINGS_NS)
-    const user = descriptor?.user
-    if (!isLegacyShape(user)) return
+  private async maybeMigrate(): Promise<void> {
+    const raw = readLiveConfig(this.readSource())
+    if (!isLegacyShape(raw)) return
+    const writer = this.writerImpl
+    if (writer === null) return
 
-    const v = user as Record<string, unknown>
-    const registry = registryFor(platform)
-    let mode: string
-    if (v.enabled === false) {
-      mode = 'off'
-    } else if (v.powerCfgWakeLock === true && v.shellWakeLock !== true && platform !== 'unsupported') {
-      // 只开 powerCfg → 该平台电源类实现。
-      mode = powerModes[platform]
-    } else {
-      mode = registry?.defaultMode ?? 'off'
-    }
-    const config: Record<string, unknown> = {}
-    if (typeof v.why === 'string' && v.why.length > 0) config.why = v.why
-
+    const next = migrateLegacyShape(raw, detectPlatform())
     try {
-      await sctx.settings.replace(SETTINGS_NS, { version: CONFIG_VERSION, platform, mode, config })
-      this.logger.info(`[${PLUGIN_ID}] 检测到 0.1.x 旧配置，已自动迁移为 v${CONFIG_VERSION} 格式并保存到配置文件`)
+      await writer(next)
+      this.logger.info(`[${PLUGIN_ID}] 检测到 0.1.x 旧配置，已自动迁移为 v${CONFIG_VERSION} 格式并保存到 profile 配置`)
     } catch (error) {
       // 迁移失败不阻塞：内存中已按新格式生效，下次设置页写入会落盘新格式。
       this.logger.warn(`[${PLUGIN_ID}] 0.1.x 旧配置自动迁移失败（${errorMessage(error)}），内存中已按新格式生效`)
     }
-    // 迁移后按新值重新解析（replace 的 settings/updated 还会再跑一次 apply，这里兜底）。
-    this.parsed = parseSettings(sctx.settings.get(SETTINGS_NS), detectPlatform())
+    this.reload()
   }
 }

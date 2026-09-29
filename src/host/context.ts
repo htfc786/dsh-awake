@@ -2,8 +2,14 @@
  * Host 侧最小上下文类型（cordis Context 的结构子集）。
  *
  * 刻意不依赖 @deepseek-ai/cordis 的类型：运行时由 Cordis 注入真实 ctx，
- * 这里只声明本插件用到的面（on / effect / inject / get / connection / logger），
+ * 这里只声明本插件用到的面（on / effect / inject / get / fiber / connection），
  * 避免为本包引入 peer 依赖链。
+ *
+ * DSH 0.1.7 起设置子系统改为「插件 Config schema + configEditor」：
+ *   - 插件导出 Config（schemastery，live 字段 .volatile()），apply(ctx, config)
+ *     收到解析后的 config 引用树，用 config.<field>.get() 读实时值；
+ *   - 写入走 configEditor.edit(entry, updater)（持久化到 profile 配置）；
+ *   - settings.configure({ auto }, fiber) 声明页面策略（自定义页 → auto:false）。
  */
 
 /** logger 服务的结构子集（cordis LoggerService：可调用 + 直接方法）。 */
@@ -14,28 +20,47 @@ export interface LoggerLike {
   error(...args: unknown[]): void
 }
 
-/** schemastery 的结构子集（仅本插件用到的构造器与链式描述）。 */
-export interface SchemasteryNode {
-  description(text: string): SchemasteryNode
-  required(value?: boolean): SchemasteryNode
+/** 一个 schemastery volatile 字段的引用（.get() 读实时值）。 */
+export interface ConfigRef<T = unknown> {
+  get(): T
 }
 
-export interface SchemasteryNamespace {
-  object(fields: Record<string, SchemasteryNode>): SchemasteryNode
-  string(): SchemasteryNode
-  number(): SchemasteryNode
-  boolean(): SchemasteryNode
-  any<T = unknown>(): SchemasteryNode
+/** apply(ctx, config) 收到的解析后 Config（live 字段为 volatile 引用）。 */
+export interface ResolvedConfig {
+  readonly version?: ConfigRef
+  readonly platform?: ConfigRef
+  readonly mode?: ConfigRef
+  readonly config?: ConfigRef
+  /** 旧形状（未迁移）未知键透传在对象上；宽松读取。 */
+  readonly [key: string]: unknown
 }
 
-/** settings 服务的结构子集（dsh-settings）。 */
+/** settings 服务的结构子集（dsh-settings 的 SettingsForms；0.1.7 起仅页面策略）。 */
 export interface SettingsService {
-  register(namespace: string, schema: unknown, options: { base: unknown }): unknown
-  update(namespace: string, patch: Record<string, unknown>): Promise<unknown>
-  replace(namespace: string, section: Record<string, unknown>): Promise<unknown>
-  get(namespace: string): unknown
-  /** 描述每个已注册命名空间（含原始 user 层，迁移检测用）。 */
-  describe(): Array<{ ns: string; user?: unknown }>
+  configure(presentation: { auto?: boolean }, owner?: unknown): () => void
+}
+
+/** configEditor 服务的结构子集（dsh-config-editor：持久化到 profile 配置）。 */
+export interface ConfigEditorService {
+  /** 用 change 计算下一份完整 raw config 并落盘 + 正常 Loader 热更新。 */
+  edit(
+    entry: unknown,
+    change: (current: Record<string, unknown>, inherited: Record<string, unknown>) => Record<string, unknown>,
+  ): Promise<void>
+}
+
+/** Loader entry 的结构子集（取 id 与原始 config）。 */
+export interface HostEntry {
+  readonly options?: {
+    readonly id?: string
+    readonly config?: Record<string, unknown>
+  }
+}
+
+/** 插件 fiber 的结构子集。 */
+export interface HostFiber {
+  readonly entry?: HostEntry
+  readonly config?: unknown
 }
 
 /** 一条精确 Fetch 路由（dsh-client-connection 的 ConnectionFetchRoute 结构子集）。 */
@@ -60,30 +85,28 @@ export interface ConnectionService {
   readonly fetch: { register(route: ConnectionFetchRoute): () => Promise<void> | void }
 }
 
-/** ctx.inject(['settings'], ...) 回调里的子上下文。 */
-export interface SettingsContext {
-  readonly settings: SettingsService
-  readonly on: HostContext['on']
-}
-
 /** ctx.inject([...], ...) 回调里的子上下文：请求的服务以可选属性出现。 */
-export interface InjectedContext extends SettingsContext {
+export interface InjectedContext {
+  readonly settings?: SettingsService
+  readonly configEditor?: ConfigEditorService
   /** 仅当 inject 列表包含 connection 时存在。 */
   readonly connection?: ConnectionService
+  readonly on: HostContext['on']
+  readonly effect: HostContext['effect']
 }
 
 /** Host 侧 cordis 上下文。 */
 export interface HostContext {
-  /** profile 上下文解析器锚点（createRequire 用；缺失 = 无法解析 schemastery）。 */
-  readonly baseUrl?: string
   readonly logger: LoggerLike
+  /** 插件自身 fiber（取 entry id / loader 配置；settings.configure 的 owner）。 */
+  readonly fiber?: HostFiber
   /** 注册一次性副作用；callback 立即执行，其返回值才是卸载时的清理函数。 */
   effect(dispose: () => void, label?: string): unknown
   /** 订阅事件。 */
   on(event: string, listener: (...args: unknown[]) => void): unknown
-  /** 读取可选服务（如 connection）；不存在返回 undefined。 */
+  /** 读取可选服务（如 connection / configEditor）；不存在返回 undefined。 */
   get<T = unknown>(service: string): T | undefined
-  /** 注入可选服务（如 settings / connection），回调收到带该服务的子上下文。 */
+  /** 注入可选服务（如 settings / configEditor / connection），回调收到带该服务的子上下文。 */
   inject(services: readonly string[], callback: (sctx: InjectedContext) => void): unknown
   /** 读取 connection 服务（可选；缺席时设置页数据面停用，服务端照常值守）。 */
   readonly connection?: ConnectionService

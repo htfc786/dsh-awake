@@ -1,6 +1,6 @@
 {
   "name": "dsh-awake",
-  "version": "0.2.1",
+  "version": "0.2.5",
   "description": "DeepSeek Harness 防休眠插件（守夜人）：agent 任务执行期间阻止操作系统休眠，任务结束后恢复；方式子系统（systemd-inhibit / GNOME gsettings / caffeinate / pmset / PowerShell / powercfg）+ 浏览器 Wake Lock + 一键更新",
   "keywords": [
     "deepseek-harness",
@@ -44,13 +44,20 @@
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-ui-slots",
-        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-cordis-client-runner",
         "@deepseek-ai/dsh-client-locale"
       ],
       "platform": "web"
     },
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.1.7-rc.2": "compatible",
+        "0.2.0-rc.1": "compatible"
+      },
+      "node": ">=20"
     }
   },
   "files": [
@@ -72,7 +79,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/schemastery": "3.18.1",
+    "@deepseek-ai/schemastery": "~3.18.4",
     "@testing-library/react": "^16.3.0",
     "@types/node": "^24.0.0",
     "@types/react": "^18.3.28",

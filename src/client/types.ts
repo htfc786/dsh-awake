@@ -4,23 +4,21 @@
  * 这里只声明本插件用到的面（slots / sessions / locale / effect）。
  */
 
-/** settings.section 注册选项（对齐官方 ui-settings 的 SlotMap 契约）。 */
-export interface SettingsSectionOptions {
-  readonly name: 'settings.section'
-  /** 左栏导航键（section key）。 */
-  readonly id: string
-  /** 导航位置（越大越靠后）。 */
-  readonly order: number
-  /** 导航文案（thunk；locale 变化时由注册方重新注册）。 */
-  readonly label: () => string
-  /** 注入给组件的字段（组件 props = { close, ...注入字段 }）。 */
+/** plugins.bundle.config 注册选项（对齐官方 ui-plugin-manager 的 keyed slot 契约）。 */
+export interface PluginBundleConfigOptions {
+  readonly name: 'plugins.bundle.config'
+  /** key = npm 包名；页面只在注册了与包名相同的 key 时渲染配置区块。 */
+  readonly key: string
+  /** 组件文案的 locale 命名空间。 */
+  readonly locale: string
+  /** 注入给组件的字段（组件 props = 宿主 owner props { view } + 本注入面）。 */
   readonly inject: () => Record<string, unknown>
 }
 
 /** slots 服务（dsh-client-ui-slots 的结构子集）。 */
 export interface SlotsService {
   inject(slot: string, contribution: () => unknown): unknown
-  register(options: SettingsSectionOptions, component: unknown): unknown
+  register(options: PluginBundleConfigOptions, component: unknown): unknown
 }
 
 /** locale 服务（dsh-client-locale 的结构子集）。 */

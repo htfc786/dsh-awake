@@ -1,4 +1,4 @@
-# dsh-awake 安装配置示例（v0.2.0 配置格式）
+# dsh-awake 安装配置示例（v0.2.3 配置格式，DSH 0.1.7）
 #
 # 用法：
 #   1. 安装插件（在 profile 目录执行 pnpm add dsh-awake@link:...，或：
@@ -7,11 +7,13 @@
 #      $DSH_HOME/profiles/<name>/cordis.patch.yml
 #      （运行中的 DSH 会热监视该文件，改动立即生效，无需重启）
 #
-# 配置格式（settings.yaml 的 dsh-awake 段，设置页「防休眠」里可热改）：
+# 配置格式（下面 insert 条目的 config，在「插件列表 → 插件详情 → dsh-awake」
+# 配置面板里可热改；DSH 0.1.7 起配置就持久化在这条 profile 插件条目的 config 上，
+# 由 configEditor 写入）：
 #   version: 2          # 配置文件版本（老配置自动转换）
 #   platform: linux     # 锚点：上次写入配置的平台（复制 .dsh 到其他系统时识别）
 #   mode: systemd       # 当前平台选中的方式（= 实现文件名）；'off' = 关闭服务端
-#   config:             # 该方式的配置；字段由方式自己声明（设置页动态表单）
+#   config:             # 该方式的配置；字段由方式自己声明（配置面板动态表单）
 #     why: 'dsh 任务执行中'
 #
 # 方式清单（platform → order → default）：
@@ -22,7 +24,7 @@
 # 浏览器 Wake Lock 是「每浏览器」状态，走 localStorage（键 dsh-awake.webWakeLock，
 # 默认开），不进配置文件；与 2.4 服务端方式完全独立。
 #
-# 「常开防休眠」（设置页底部开关）是纯内存状态：不写配置文件，宿主重启即失效，
+# 「常开防休眠」（配置面板底部开关）是纯内存状态：不写配置文件，宿主重启即失效，
 # 每次需要时再开（RPC awake.alwaysOn 控制，详见 README）。
 
 - insert:

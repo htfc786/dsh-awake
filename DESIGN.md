@@ -7,6 +7,16 @@
 > **0.2.1 兼容性修正**：DSH 0.1.5-rc 的 Connection 专用通道（`rpc.handle`）在第三方
 > 插件里必挂（`webServer` 解析到提供方祖先链）；数据面改为 `POST /api/dsh-awake`
 > 精确路由（`connection.fetch.register`），并且不再声明任何必需服务（见 3.3）。
+>
+> **0.2.2 适配 DSH 0.1.7（设置子系统）**：0.1.7 移除了 `settings.register` / `settings.get`
+> （旧 `SettingsProvider`/`SettingsForms` 早期 API），设置改为「插件 Config schema +
+> `configEditor`」单层模型。本版：`src/index.ts` 导出 `Config`（live 字段 `.volatile()`）；
+> `src/host/settings.ts` 改为 `config.<field>.get()` 读实时值、`configEditor.edit(entry, …)`
+> 写回当前 profile 插件配置、`settings.configure({auto:false})` 声明自定义页；旧的
+> 「入口 config 作 base + settings.yaml 覆盖层」两层语义塌缩为 profile 插件 config 单层
+> （0.1.7 的 `importLegacyDocument` 会把旧 settings.yaml 段一次性导入）。详见 3.2。
+> 同时 `package.json` 的 `dsh.client.inject` 去掉 0.1.7 已删除的 `@deepseek-ai/dsh-client-runtime`
+> （换为其后继 `@deepseek-ai/dsh-cordis-client-runner`，见 5）。
 
 ## 0. 设计原则
 
@@ -51,7 +61,7 @@ src/
 │       ├── powershell.ts
 │       └── powercfg.ts
 └── client/             # client 半（浏览器；JSX）
-    ├── index.ts        # settings.section 注册 + locale + 样式清理 effect
+    ├── index.ts        # plugins.bundle.config 注册 + locale + 样式清理 effect
     ├── types.ts        # ClientContext 最小结构类型（slots / sessions / locale / effect）
     ├── api.ts          # 数据面封装（同源 fetch，status / select / refresh…）+ compareVersions
     ├── locales.ts      # zh/en 文案字典（zh 为基准，en 可后补）
@@ -161,26 +171,42 @@ export const linuxRegistry = {
 - 设置变更（settings/updated）→ 若 `openTurns > 0` 则先放锁再按新配置拿锁（对账）。
 - 插件卸载 → 无条件放锁（effect disposer，保留现状）。
 
-### 3.2 settings 命名空间（宽松 schema + stale 检测）
+### 3.2 配置（DSH 0.1.7：插件 Config schema + configEditor）
+
+> **0.2.2 重写**：0.1.7 移除了 `settings.register(ns, schema, {base})` / `settings.get(ns)`
+> （旧 `SettingsProvider`）。设置改为「插件 Config」单层——插件的 Config schema 就是权威
+> 设置面，值来自**当前 profile 的插件条目 config**；不再有 settings.yaml 覆盖层。
 
 ```yaml
-# settings.yaml 里的 dsh-awake 段
-dsh-awake:
-  version: 2          # 当前配置文件版本：2，如果有老配置，自动转换新的配置
-  platform: linux     # 锚点：上次写入配置的平台（复制 .dsh 到其他系统时识别）
-  mode: systemd       # 当前平台选中的方式（= 实现文件名）；'off' = 关闭服务端
-  config:             # 该方式的配置；多数方式为空 {}，字段由方式声明
-    why: 'dsh 任务执行中'
+# 当前 profile 配置层里 dsh-awake 条目的 config（设置页写回此处）
+version: 2          # 当前配置文件版本：2，如果有老配置，自动转换新的配置
+platform: linux     # 锚点：上次写入配置的平台（复制 .dsh 到其他系统时识别）
+mode: systemd       # 当前平台选中的方式（= 实现文件名）；'off' = 关闭服务端
+config:             # 该方式的配置；多数方式为空 {}，字段由方式声明
+  why: 'dsh 任务执行中'
 # 注：常开防休眠（alwaysOn）不在此处——纯内存状态，见 3.1。
 ```
 
-- schema：`{ platform: string, mode: string, config: 任意对象 }`——**绝不在 schema 里枚举 config 键**。
-- 解析规则（跨平台复制 / 插件升级实现被删，统一一条逻辑）：
+- 声明：`src/index.ts` 导出 `Config`（schemastery；live 字段 `.volatile()`）——**绝不在
+  schema 里枚举 config 键**（`config` 用 `any()`，键由方式声明、校验在 host 侧）。
+- 读：`apply(ctx, config)` 收到解析后的引用树，`config.<field>.get()` 读实时值；
+  loader 的 `_commitVolatile` 在写入时就地更新引用（**不重启插件**）。
+- 写：`configEditor.edit(entry, () => next)` 整段写回当前 profile 插件配置。
+- 页面策略：`settings.configure({ auto: false }, fiber)`（awake 自带设置页）。
+- 外部变更：监听 `loader/volatile-update` → 重新解析 + 协调器对账。
+- 解析规则（跨平台复制 / 插件升级实现被删，统一一条逻辑，`parseSettings` 不变）：
   1. `platform === 当前平台 && mode 在注册表` → 正常；
-  2. 否则 → 运行时用平台默认方式，`stale = true`，**不覆盖文件**（拷回原系统配置仍可用），
+  2. 否则 → 运行时用平台默认方式，`stale = true`，**不覆盖配置**（拷回原系统配置仍可用），
      设置页黄色提示"检测到配置来自 Windows，当前为 Linux，已使用默认方式 systemd"；
   3. 用户下一次保存时 `platform` 更新为当前平台。
 - `mode === 'off'`：服务端不值守，状态行显示"未启用"，无红色提示（用户主动选择）。
+- 迁移：0.1.7 的 `SettingsForms.importLegacyDocument` 会把旧 `settings.yaml` 段一次性导入；
+  更早的 0.1.x 旧形状（`enabled`/`shellWakeLock`/…）由 `maybeMigrate` 识别原始 config 后
+  经 `configEditor.edit` 写回新形状（写回后不再命中，无循环）。
+- **两层 → 单层的取舍**：旧模型「入口 config 作 base + settings.yaml 覆盖层」塌缩为
+  「profile 插件条目 config 单层」。用户可感知行为不变（设置页热改、跨平台 stale 提示、
+  off 语义、迁移都保留）；差异是写入落点从 settings.yaml 变为 profile 插件配置，且
+  config 写入经 loader 的 volatile 通道（不重启插件、内存态 alwaysOn 保留）。
 
 ### 3.3 数据面路由（rpc.ts）
 
@@ -232,25 +258,30 @@ export interface ModeInfo {
 export interface AttemptLog { id: string; ok: boolean; reason?: string }
 ```
 
-## 4. client 半（设置页）
+## 4. client 半（插件详情页配置面板）
 
-### 4.1 注册（settings.section，对齐 dsh-pocket）
+### 4.1 注册（plugins.bundle.config，对齐 dsh-yolo-mode 0.6.x）
 
 ```ts
 export const inject = ['slots', 'sessions', 'locale']
-// ctx.slots.inject('settings.section', () => ctx.slots.register({
-//   name: 'settings.section', id: 'dsh-awake', order: 60,
-//   label: () => t('sectionLabel'), inject: () => ({ api }),
+// ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
+//   name: 'plugins.bundle.config', key: 'dsh-awake', locale: 'settings.awake',
+//   inject: () => ({ api, manager, t }),
 // }, AwakeSection))
 ```
 
+- 配置渲染在「插件列表 → dsh-awake」详情页（包描述与组件行之间）。该 keyed slot 以
+  npm 包名为 key，只在注册了与包名相同的 key 时页面才渲染配置区块。bundle 页只请求
+  `view:'page'`，且不传宿主 `form`（草稿/校验/保存由本插件自持，走 `/api/dsh-awake`）。
+- `settings.section` 已退役，DSH 设置面板不再出现本插件；宿主侧 `settings.configure({ auto: false })`
+  保留，抑制宿主按 Config schema 自动生成的设置页。
 - `sessions`：2.3 浏览器 Wake Lock 需要"是否有任务在运行"（保留现有 WakeLockManager 逻辑）。
 - `locale`：zh 基准 + en 可后补（结构预留，先只填 zh 也行）。
 
 ### 4.2 页面布局（2.1–2.4 全部确认项）
 
 ```
-┌─ 防休眠（settings.section 标签）──────────────────────────┐
+┌─ dsh-awake（插件详情页配置面板）─────────────────────────┐
 │ [● 后端已连接] [● 值守中 · systemd]            [🔄 刷新] │  ← 2.1 状态行
 │ ──────────────────────────────────────────────────────   │
 │ ⚠ 配置来自 Windows，当前为 Linux，已使用默认方式 systemd  │  ← 提示区（黄）
@@ -317,7 +348,7 @@ export const inject = ['slots', 'sessions', 'locale']
 2. **modes 子系统**：shared 工具（看门狗/terminate/runCommand/probe）+ 6 个实现 +
    3 个平台注册表（原 shell.ts/power.ts 逻辑平移，抽公共部分）。
 3. **host**：coordinator（引用计数 + 回退）+ settings（宽松 schema + stale）+ rpc + service 入口。
-4. **client**：api.ts + 5 个组件 + settings.section 注册 + WakeLockManager 接 localStorage。
+4. **client**：api.ts + 5 个组件 + plugins.bundle.config 注册 + WakeLockManager 接 localStorage。
 5. **收尾**：迁移逻辑 + README + 版本 bump + 打包验证（`pnpm build` + 装进测试 profile 验收）。
 
 ## 8. 待确认的小点（未阻塞，默认值如下）

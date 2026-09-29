@@ -1,7 +1,8 @@
 /**
- * 设置页主组件：2.1 状态行 + 2.2 提示区 + 2.2 更新卡片 + 2.3 浏览器开关 + 2.4 方式选择
- * + 常开防休眠开关（页面底部）。
+ * 插件详情页（「插件列表 → dsh-awake」）配置面板主组件：2.1 状态行 + 2.2 提示区
+ * + 2.2 更新卡片 + 2.3 浏览器开关 + 2.4 方式选择 + 常开防休眠开关（面板底部）。
  * 打开时拉取 + 每 5s 轮询（dsh-pocket 同款）；刷新按钮 = awake.refresh。
+ * 宿主额外的 owner props（`view`）由组件忽略——bundle 页只请求 `view:'page'`。
  */
 import { useEffect, useRef, useState } from 'react'
 import type { AwakeStatus } from '../../types.js'
@@ -17,7 +18,7 @@ import { styles } from './styles.js'
 import { UpdateCard } from './UpdateCard.js'
 
 export interface AwakeSectionProps {
-  /** settings.section 注入面。 */
+  /** plugins.bundle.config 注入面。 */
   readonly api: AwakeApi
   readonly manager: WakeLockManager
   readonly t: (key: string) => string
